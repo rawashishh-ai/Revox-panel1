@@ -41,7 +41,51 @@ const LOCKED_BLUR_PLACEHOLDER = 'THEUPCYBER••••••';
 const ACTIVE_ORDER_STORAGE_KEY = 'revox_rupayex_active_order_v5';
 const RECEIPT_STORAGE_KEY = 'revox_rupayex_receipt_v5';
 
+const BACKEND_ORIGINS = [
+  '',
+  'https://ais-pre-jfvgsgbq4nps66sk6v2ogj-412645379901.asia-southeast1.run.app',
+  'https://ais-dev-jfvgsgbq4nps66sk6v2ogj-412645379901.asia-southeast1.run.app',
+];
+
+async function postGatewayApi(
+  endpointPath: string,
+  payload: Record<string, unknown>
+): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
+  let lastError: unknown = null;
+
+  for (const baseOrigin of BACKEND_ORIGINS) {
+    try {
+      const response = await fetch(`${baseOrigin}${endpointPath}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        // Current host returned HTML 404 (e.g. static host without /api route); try next backend origin
+        continue;
+      }
+
+      const data = (await response.json()) as Record<string, unknown>;
+      return {
+        ok: response.ok,
+        status: response.status,
+        data,
+      };
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('Gateway server unreachable');
+}
+
 interface SavedReceipt {
+  deviceId: string;
   orderId: string;
   amount: number;
   unlockKey: string;
@@ -156,7 +200,7 @@ export default function App() {
     [currentUser, deviceId]
   );
 
-  // Save verified receipt to localStorage
+  // Save verified receipt to localStorage bound to this deviceId
   const persistVerifiedReceipt = useCallback(
     (
       orderId: string,
@@ -166,6 +210,7 @@ export default function App() {
       utr?: string | null
     ) => {
       const receipt: SavedReceipt = {
+        deviceId,
         orderId,
         amount,
         unlockKey: key,
@@ -175,7 +220,7 @@ export default function App() {
       };
       localStorage.setItem(RECEIPT_STORAGE_KEY, JSON.stringify(receipt));
     },
-    []
+    [deviceId]
   );
 
   // Server-side verification of an order ID via POST /api/rupayex/verify-order
@@ -185,53 +230,62 @@ export default function App() {
       setPaymentError(null);
 
       try {
-        const res = await fetch('/api/rupayex/verify-order', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            orderId: orderIdToVerify,
-            deviceId,
-            deviceSecret,
-          }),
+        const res = await postGatewayApi('/api/rupayex/verify-order', {
+          orderId: orderIdToVerify,
+          deviceId,
+          deviceSecret,
         });
 
-        const data = await res.json();
+        const data = res.data;
 
         if (!res.ok) {
           setPaymentError(
-            data.message || 'Unable to verify payment status with RupayEx.'
+            String(data.message || 'Unable to verify payment status with RupayEx.')
           );
           return;
         }
 
-        if (data.status === 'PAID' && data.unlockKey && data.deviceId === deviceId) {
-          setUnlockedKey(data.unlockKey);
-          setLicenseKey(data.licenseKey || null);
-          setVerifiedOrderId(data.orderId);
+        if (
+          data.status === 'PAID' &&
+          typeof data.unlockKey === 'string' &&
+          data.deviceId === deviceId
+        ) {
+          const verifiedKey = data.unlockKey;
+          const verifiedLic =
+            typeof data.licenseKey === 'string' ? data.licenseKey : undefined;
+          const verifiedId = String(data.orderId || orderIdToVerify);
+
+          setUnlockedKey(verifiedKey);
+          setLicenseKey(verifiedLic || null);
+          setVerifiedOrderId(verifiedId);
           setIsPaid(true);
           localStorage.removeItem(ACTIVE_ORDER_STORAGE_KEY);
           persistVerifiedReceipt(
-            data.orderId,
+            verifiedId,
             FIXED_KEY_PRICE,
-            data.unlockKey,
-            data.licenseKey,
-            data.utr
+            verifiedKey,
+            verifiedLic,
+            typeof data.utr === 'string' ? data.utr : null
           );
           await syncDeviceOrderToFirestore(
-            data.orderId,
+            verifiedId,
             FIXED_KEY_PRICE,
             'PAID',
-            data.unlockKey
+            verifiedKey
           );
         } else if (data.status === 'FAILED') {
           localStorage.removeItem(ACTIVE_ORDER_STORAGE_KEY);
           setPaymentError(
-            data.message || 'Payment failed or was declined. Please try again.'
+            String(
+              data.message || 'Payment failed or was declined. Please try again.'
+            )
           );
         } else if (data.status === 'CANCELLED') {
           localStorage.removeItem(ACTIVE_ORDER_STORAGE_KEY);
           setPaymentError(
-            data.message || 'Payment was cancelled. Please click PAY NOW to try again.'
+            String(
+              data.message || 'Payment was cancelled. Please click PAY NOW to try again.'
+            )
           );
         } else {
           setPaymentError(
@@ -265,21 +319,46 @@ export default function App() {
         return;
       }
 
+      // Check saved verified receipt for this specific device
       try {
-        const res = await fetch('/api/rupayex/device-session', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ deviceId, deviceSecret }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (!cancelled && data.unlocked && data.unlockKey) {
-            setUnlockedKey(data.unlockKey);
-            setLicenseKey(data.licenseKey || null);
-            setVerifiedOrderId(data.orderId || 'VERIFIED');
+        const rawReceipt = localStorage.getItem(RECEIPT_STORAGE_KEY);
+        if (rawReceipt) {
+          const parsed = JSON.parse(rawReceipt) as SavedReceipt;
+          if (
+            parsed &&
+            parsed.deviceId === deviceId &&
+            typeof parsed.unlockKey === 'string' &&
+            parsed.unlockKey.length > 4
+          ) {
+            setUnlockedKey(parsed.unlockKey);
+            setLicenseKey(parsed.licenseKey || null);
+            setVerifiedOrderId(parsed.orderId || 'VERIFIED');
             setIsPaid(true);
             return;
           }
+        }
+      } catch {
+        // Ignore storage parse error
+      }
+
+      try {
+        const res = await postGatewayApi('/api/rupayex/device-session', {
+          deviceId,
+          deviceSecret,
+        });
+        if (
+          res.ok &&
+          !cancelled &&
+          res.data.unlocked &&
+          typeof res.data.unlockKey === 'string'
+        ) {
+          setUnlockedKey(res.data.unlockKey);
+          setLicenseKey(
+            typeof res.data.licenseKey === 'string' ? res.data.licenseKey : null
+          );
+          setVerifiedOrderId(String(res.data.orderId || 'VERIFIED'));
+          setIsPaid(true);
+          return;
         }
       } catch {
         // Ignore network error
@@ -325,59 +404,63 @@ export default function App() {
     setCheckoutUrl(null);
 
     try {
-      const response = await fetch('/api/rupayex/create-order', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          deviceId,
-          deviceSecret,
-          uid: currentUser?.uid,
-          amount: FIXED_KEY_PRICE,
-          customerName: currentUser?.displayName || 'Revox Customer',
-          customerEmail: currentUser?.email || 'user@revoxpanel.site',
-          customerMobile: '9876543210',
-          originUrl: window.location.origin,
-        }),
+      const response = await postGatewayApi('/api/rupayex/create-order', {
+        deviceId,
+        deviceSecret,
+        uid: currentUser?.uid,
+        amount: FIXED_KEY_PRICE,
+        customerName: currentUser?.displayName || 'Revox Customer',
+        customerEmail: currentUser?.email || 'user@revoxpanel.site',
+        customerMobile: '9876543210',
+        originUrl: window.location.origin,
       });
 
-      const data = await response.json();
+      const data = response.data;
 
-      if (response.status === 409 && data.error === 'ALREADY_PAID' && data.unlockKey) {
+      if (
+        response.status === 409 &&
+        data.error === 'ALREADY_PAID' &&
+        typeof data.unlockKey === 'string'
+      ) {
         setUnlockedKey(data.unlockKey);
-        setLicenseKey(data.licenseKey || null);
-        setVerifiedOrderId(data.orderId || 'VERIFIED');
+        setLicenseKey(
+          typeof data.licenseKey === 'string' ? data.licenseKey : null
+        );
+        setVerifiedOrderId(String(data.orderId || 'VERIFIED'));
         setIsPaid(true);
         return;
       }
 
-      if (!response.ok || !data.paymentUrl) {
+      const paymentUrl =
+        typeof data.paymentUrl === 'string' ? data.paymentUrl : '';
+      const orderId = typeof data.orderId === 'string' ? data.orderId : '';
+
+      if (!response.ok || !paymentUrl) {
         setPaymentError(
-          data.message || 'Failed to initiate payment with RupayEx gateway.'
+          String(
+            data.message || 'Failed to initiate payment with RupayEx gateway.'
+          )
         );
         return;
       }
 
-      setActiveOrderId(data.orderId);
-      setCheckoutUrl(data.paymentUrl);
-      localStorage.setItem(ACTIVE_ORDER_STORAGE_KEY, data.orderId);
+      setActiveOrderId(orderId);
+      setCheckoutUrl(paymentUrl);
+      localStorage.setItem(ACTIVE_ORDER_STORAGE_KEY, orderId);
 
-      if (currentUser?.emailVerified) {
-        await syncDeviceOrderToFirestore(
-          data.orderId,
-          FIXED_KEY_PRICE,
-          'PENDING'
-        );
+      if (currentUser?.emailVerified && orderId) {
+        await syncDeviceOrderToFirestore(orderId, FIXED_KEY_PRICE, 'PENDING');
       }
 
       // Redirect customer directly to the payment gateway checkout URL returned by RupayEx API
       try {
         if (window.top && window.top !== window.self) {
-          window.top.location.href = data.paymentUrl;
+          window.top.location.href = paymentUrl;
         } else {
-          window.location.href = data.paymentUrl;
+          window.location.href = paymentUrl;
         }
       } catch {
-        window.location.assign(data.paymentUrl);
+        window.location.assign(paymentUrl);
       }
     } catch {
       setPaymentError('Unable to reach payment gateway server. Please try again.');

@@ -1,5 +1,6 @@
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
+import crypto from 'crypto';
 import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -13,18 +14,36 @@ const RUPAYEX_API_BASE = 'https://rupayex.net/api';
 const FIXED_KEY_PRICE = 210;
 const CONFIG_FILE = path.join(process.cwd(), '.rupayex-config.json');
 
+// Enable CORS for custom domain deployments (e.g., revoxpanel.site)
+app.use((req, res, next) => {
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(200).end();
+    return;
+  }
+  next();
+});
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 const UNLOCK_KEY_VALUE = 'THEUPCYBER111asx';
 
-function generateAlphanumericLicenseKey(): string {
+function deriveDeterministicLicenseKey(
+  orderId: string,
+  deviceId: string,
+  secret: string
+): string {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-  const segment = () =>
-    Array.from({ length: 4 }, () =>
-      chars.charAt(Math.floor(Math.random() * chars.length))
-    ).join('');
-  return `${segment()}-${segment()}-${segment()}-${segment()}`;
+  const hash = crypto
+    .createHmac('sha256', secret || 'revox_secret')
+    .update(`${orderId}:${deviceId}`)
+    .digest();
+  const segment = (offset: number) =>
+    Array.from({ length: 4 }, (_, i) => chars[hash[offset + i] % chars.length]).join('');
+  return `${segment(0)}-${segment(4)}-${segment(8)}-${segment(12)}`;
 }
 
 function getServerRupayexToken(): string {
@@ -318,14 +337,20 @@ app.post('/api/rupayex/create-order', async (req, res) => {
 });
 
 // Finalize confirmed PAID order idempotently (prevents duplicate key generation)
-function markOrderPaidIdempotent(record: OrderRecord, utr?: string) {
+function markOrderPaidIdempotent(
+  record: OrderRecord,
+  userToken: string,
+  utr?: string
+) {
   if (record.status === 'PAID' && record.unlockKey && record.licenseKey) {
     return;
   }
   record.status = 'PAID';
   record.paidAt = record.paidAt || Date.now();
   record.unlockKey = record.unlockKey || UNLOCK_KEY_VALUE;
-  record.licenseKey = record.licenseKey || generateAlphanumericLicenseKey();
+  record.licenseKey =
+    record.licenseKey ||
+    deriveDeterministicLicenseKey(record.orderId, record.deviceId, userToken);
   if (utr) {
     record.utr = utr;
   }
@@ -334,30 +359,46 @@ function markOrderPaidIdempotent(record: OrderRecord, utr?: string) {
 }
 
 // Server-side verification with GET https://rupayex.net/api/order-status
-async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
+async function verifyOrderWithRupayexServer(
+  orderId: string,
+  deviceId: string,
+  deviceSecret: string
+): Promise<{
   status: 'PENDING' | 'PAID' | 'FAILED' | 'CANCELLED';
   gatewayMessage?: string;
+  amount: number;
+  unlockKey: string | null;
+  licenseKey: string | null;
+  paidAt?: number;
   utr?: string;
 }> {
-  if (record.status === 'PAID' && record.unlockKey) {
+  const existingRecord = orders.get(orderId);
+  if (existingRecord && existingRecord.status === 'PAID' && existingRecord.unlockKey) {
     return {
       status: 'PAID',
-      utr: record.utr,
+      amount: existingRecord.amount,
+      unlockKey: existingRecord.unlockKey,
+      licenseKey: existingRecord.licenseKey,
+      paidAt: existingRecord.paidAt,
+      utr: existingRecord.utr,
     };
   }
 
   const userToken = getServerRupayexToken();
   if (!userToken) {
     return {
-      status: record.status,
+      status: existingRecord?.status || 'PENDING',
       gatewayMessage: 'Server API token is not configured.',
+      amount: FIXED_KEY_PRICE,
+      unlockKey: null,
+      licenseKey: null,
     };
   }
 
   try {
     const statusUrl = `${RUPAYEX_API_BASE}/order-status?user_token=${encodeURIComponent(
       userToken
-    )}&order_id=${encodeURIComponent(record.orderId)}`;
+    )}&order_id=${encodeURIComponent(orderId)}`;
 
     const resp = await fetch(statusUrl, {
       method: 'GET',
@@ -366,16 +407,23 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
 
     if (!resp.ok) {
       return {
-        status: record.status,
+        status: existingRecord?.status || 'PENDING',
         gatewayMessage: 'Gateway status check returned non-200 HTTP response.',
+        amount: FIXED_KEY_PRICE,
+        unlockKey: null,
+        licenseKey: null,
       };
     }
 
     const data = (await resp.json()) as {
       status?: boolean | string;
+      payment_status?: string;
       txnStatus?: string;
+      amount?: number | string;
+      utr?: string | null;
       message?: string;
       result?: {
+        payment_status?: string;
         txnStatus?: string;
         status?: string;
         orderStatus?: string;
@@ -385,7 +433,9 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
     };
 
     const rawStatus = String(
-      data.result?.txnStatus ||
+      data.payment_status ||
+        data.result?.payment_status ||
+        data.result?.txnStatus ||
         data.result?.status ||
         data.result?.orderStatus ||
         data.txnStatus ||
@@ -393,15 +443,41 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
         ''
     ).toUpperCase();
 
+    const record: OrderRecord = existingRecord || {
+      orderId,
+      rupayexOrderId: orderId,
+      deviceId,
+      deviceSecret,
+      amount: Number(data.amount) || FIXED_KEY_PRICE,
+      customer: {
+        name: 'Revox Customer',
+        email: 'user@revoxpanel.site',
+        mobile: '9876543210',
+      },
+      paymentUrl: '',
+      status: 'PENDING',
+      unlockKey: null,
+      licenseKey: null,
+      createdAt: Date.now(),
+    };
+
     if (
       rawStatus === 'SUCCESS' ||
       rawStatus === 'COMPLETED' ||
       rawStatus === 'PAID'
     ) {
-      markOrderPaidIdempotent(record, data.result?.utr);
+      markOrderPaidIdempotent(
+        record,
+        userToken,
+        data.utr || data.result?.utr || undefined
+      );
       return {
         status: 'PAID',
         gatewayMessage: data.message || 'Payment verified successfully.',
+        amount: record.amount,
+        unlockKey: record.unlockKey,
+        licenseKey: record.licenseKey,
+        paidAt: record.paidAt,
         utr: record.utr,
       };
     }
@@ -415,20 +491,26 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
       record.status = 'FAILED';
       record.failureReason =
         data.message || 'Payment failed or was declined by the gateway.';
-      orders.set(record.orderId, record);
+      orders.set(orderId, record);
       return {
         status: 'FAILED',
         gatewayMessage: record.failureReason,
+        amount: record.amount,
+        unlockKey: null,
+        licenseKey: null,
       };
     }
 
     if (rawStatus === 'CANCELLED' || rawStatus === 'CANCELED') {
       record.status = 'CANCELLED';
       record.failureReason = data.message || 'Payment was cancelled by the user.';
-      orders.set(record.orderId, record);
+      orders.set(orderId, record);
       return {
         status: 'CANCELLED',
         gatewayMessage: record.failureReason,
+        amount: record.amount,
+        unlockKey: null,
+        licenseKey: null,
       };
     }
 
@@ -436,12 +518,18 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
       status: 'PENDING',
       gatewayMessage:
         data.message || 'Payment is still pending confirmation from RupayEx.',
+      amount: record.amount,
+      unlockKey: null,
+      licenseKey: null,
     };
   } catch (err) {
     console.error('Error verifying order with RupayEx:', err);
     return {
-      status: record.status,
+      status: existingRecord?.status || 'PENDING',
       gatewayMessage: 'Unable to reach RupayEx verification server.',
+      amount: FIXED_KEY_PRICE,
+      unlockKey: null,
+      licenseKey: null,
     };
   }
 }
@@ -463,12 +551,11 @@ app.post('/api/rupayex/webhook', async (req, res) => {
     }
 
     const record = orders.get(orderId);
-    if (!record) {
-      res.status(404).json({ status: false, message: 'Order not found' });
-      return;
-    }
-
-    await verifyOrderWithRupayexServer(record);
+    await verifyOrderWithRupayexServer(
+      orderId,
+      record?.deviceId || 'webhook_device',
+      record?.deviceSecret || 'webhook_secret_key'
+    );
 
     res.json({ status: true });
   } catch {
@@ -476,7 +563,7 @@ app.post('/api/rupayex/webhook', async (req, res) => {
   }
 });
 
-// Verify Order Endpoint called after redirect
+// Verify Order Endpoint called after redirect (stateless-compatible)
 app.post('/api/rupayex/verify-order', async (req, res) => {
   try {
     const { orderId, deviceId, deviceSecret } = req.body || {};
@@ -488,18 +575,24 @@ app.post('/api/rupayex/verify-order', async (req, res) => {
       return;
     }
 
-    const record = orders.get(orderId);
-    if (!record) {
-      res.status(404).json({
-        error: 'ORDER_NOT_FOUND',
-        message: 'Order not found or session expired. Please initiate a new payment.',
+    if (
+      typeof deviceId !== 'string' ||
+      !/^[a-zA-Z0-9_-]{8,128}$/.test(deviceId) ||
+      typeof deviceSecret !== 'string' ||
+      !/^[a-zA-Z0-9_-]{16,128}$/.test(deviceSecret)
+    ) {
+      res.status(400).json({
+        error: 'INVALID_DEVICE_IDENTITY',
+        message: 'Valid device identity is required.',
       });
       return;
     }
 
+    const existingRecord = orders.get(orderId);
     if (
-      record.deviceId !== deviceId ||
-      record.deviceSecret !== deviceSecret
+      existingRecord &&
+      (existingRecord.deviceId !== deviceId ||
+        existingRecord.deviceSecret !== deviceSecret)
     ) {
       res.status(403).json({
         error: 'FORBIDDEN_DEVICE',
@@ -508,17 +601,21 @@ app.post('/api/rupayex/verify-order', async (req, res) => {
       return;
     }
 
-    const verification = await verifyOrderWithRupayexServer(record);
+    const verification = await verifyOrderWithRupayexServer(
+      orderId,
+      deviceId,
+      deviceSecret
+    );
 
     res.json({
-      orderId: record.orderId,
-      deviceId: record.deviceId,
+      orderId,
+      deviceId,
       status: verification.status,
       message: verification.gatewayMessage,
-      amount: record.amount,
-      unlockKey: verification.status === 'PAID' ? record.unlockKey : null,
-      licenseKey: verification.status === 'PAID' ? record.licenseKey : null,
-      paidAt: record.paidAt || null,
+      amount: verification.amount,
+      unlockKey: verification.unlockKey,
+      licenseKey: verification.licenseKey,
+      paidAt: verification.paidAt || null,
       utr: verification.utr || null,
     });
   } catch (error) {

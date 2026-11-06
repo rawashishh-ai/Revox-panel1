@@ -1,38 +1,9 @@
 import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import { getServerRupayexToken } from './_config.js';
 
 const RUPAYEX_API_BASE = 'https://rupayex.net/api';
 const FIXED_KEY_PRICE = 210;
 const UNLOCK_KEY_VALUE = 'THEUPCYBER111asx';
-
-function getServerRupayexToken() {
-  const envToken = (
-    process.env.RUPAYEX_API_TOKEN ||
-    process.env.RUPAYEX_USER_TOKEN ||
-    process.env.USER_TOKEN ||
-    process.env.API_TOKEN ||
-    ''
-  ).trim();
-
-  if (envToken && !envToken.includes('MY_') && envToken.length > 4) {
-    return envToken;
-  }
-
-  try {
-    const configPath = path.join(process.cwd(), '.rupayex-config.json');
-    if (fs.existsSync(configPath)) {
-      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-      if (parsed.userToken && String(parsed.userToken).trim().length > 4) {
-        return String(parsed.userToken).trim();
-      }
-    }
-  } catch {
-    // Ignore file read errors
-  }
-
-  return '';
-}
 
 function deriveDeterministicLicenseKey(orderId, deviceId, secret) {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';

@@ -70,7 +70,7 @@ function getServerRupayexToken(): string {
     console.error('Failed to read server gateway config:', err);
   }
 
-  return '';
+  return 'a49e9238076b83c460f31849a3cb7e8e';
 }
 
 interface CustomerDetails {

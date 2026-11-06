@@ -10,7 +10,7 @@ const app = express();
 const PORT = 3000;
 
 const RUPAYEX_API_BASE = 'https://rupayex.net/api';
-const BASE_START_AMOUNT = 100;
+const FIXED_KEY_PRICE = 210;
 const CONFIG_FILE = path.join(process.cwd(), '.rupayex-config.json');
 
 app.use(express.json());
@@ -78,43 +78,8 @@ interface OrderRecord {
   failureReason?: string;
 }
 
-interface DevicePriceState {
-  amount: number;
-  isStopped: boolean;
-  stoppedAt?: number;
-}
-
 const orders = new Map<string, OrderRecord>();
 const paidOrderByDevice = new Map<string, string>();
-const devicePriceByDevice = new Map<string, DevicePriceState>();
-
-// Sync per-device dynamic price state (starts at ₹100, +₹20 every 5s until stopped)
-app.post('/api/rupayex/sync-device-price', (req, res) => {
-  try {
-    const { deviceId, amount, isStopped } = req.body || {};
-    if (typeof deviceId === 'string' && deviceId.length >= 8) {
-      const prev = devicePriceByDevice.get(deviceId);
-      const validAmount = Math.max(
-        BASE_START_AMOUNT,
-        Number(amount) || BASE_START_AMOUNT
-      );
-      const nowStopped = Boolean(isStopped);
-      devicePriceByDevice.set(deviceId, {
-        amount: validAmount,
-        isStopped: nowStopped,
-        stoppedAt: nowStopped ? prev?.stoppedAt || Date.now() : undefined,
-      });
-      res.json({
-        amount: validAmount,
-        isStopped: nowStopped,
-      });
-      return;
-    }
-    res.status(400).json({ error: 'Invalid deviceId' });
-  } catch {
-    res.status(500).json({ error: 'Failed to sync price' });
-  }
-});
 
 // Check if THIS specific device has already paid and unlocked its key
 app.post('/api/rupayex/device-session', (req, res) => {
@@ -125,7 +90,6 @@ app.post('/api/rupayex/device-session', (req, res) => {
       return;
     }
 
-    const savedPriceState = devicePriceByDevice.get(deviceId);
     const paidOrderId = paidOrderByDevice.get(deviceId);
 
     if (paidOrderId) {
@@ -141,7 +105,6 @@ app.post('/api/rupayex/device-session', (req, res) => {
           unlocked: true,
           orderId: record.orderId,
           amount: record.amount,
-          isStopped: true,
           unlockKey: record.unlockKey,
           licenseKey: record.licenseKey,
           paidAt: record.paidAt,
@@ -153,23 +116,20 @@ app.post('/api/rupayex/device-session', (req, res) => {
 
     res.json({
       unlocked: false,
-      savedAmount: savedPriceState?.amount || null,
-      isStopped: savedPriceState?.isStopped || false,
+      amount: FIXED_KEY_PRICE,
     });
   } catch {
     res.json({ unlocked: false });
   }
 });
 
-// Initiate Payment Request via POST https://rupayex.net/api/create-order
-// Redirects directly to RupayEx Checkout URL (NO QR code on our website)
+// Initiate Payment Request via POST https://rupayex.net/api/create-order for fixed ₹210
 app.post('/api/rupayex/create-order', async (req, res) => {
   try {
     const {
       deviceId,
       deviceSecret,
       uid,
-      amount: requestedAmount,
       customerName,
       customerEmail,
       customerMobile,
@@ -217,7 +177,7 @@ app.post('/api/rupayex/create-order', async (req, res) => {
       res.status(400).json({
         error: 'GATEWAY_TOKEN_MISSING',
         message:
-          'RUPAYEX_API_TOKEN is not set in server environment (.env). Please set RUPAYEX_API_TOKEN on the server.',
+          'RUPAYEX_API_TOKEN is not set in server environment (.env). Please configure RUPAYEX_API_TOKEN on the server.',
       });
       return;
     }
@@ -237,10 +197,7 @@ app.post('/api/rupayex/create-order', async (req, res) => {
         .trim()
         .slice(0, 80) || 'user@revoxpanel.site';
 
-    const amount = Math.max(
-      BASE_START_AMOUNT,
-      Math.round(Number(requestedAmount) || BASE_START_AMOUNT)
-    );
+    const amount = FIXED_KEY_PRICE;
 
     const baseRedirectUrl = (
       String(originUrl || process.env.APP_URL || '').trim() ||
@@ -250,7 +207,6 @@ app.post('/api/rupayex/create-order', async (req, res) => {
     const orderId = `RX${Date.now()}${Math.floor(1000 + Math.random() * 9000)}`;
     const redirectUrl = `${baseRedirectUrl}/?order_id=${encodeURIComponent(orderId)}`;
 
-    // Build official RupayEx POST /api/create-order payload
     const formParams = new URLSearchParams();
     formParams.append('user_token', userToken);
     formParams.append('amount', String(amount));

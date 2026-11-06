@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "DeviceUnlock": {
+      "title": "DeviceUnlock",
+      "description": "Stores per-device and per-user Cashfree QR payment order and unlock key state.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the device owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "deviceId": {
+          "type": "string",
+          "description": "Unique cryptographic identifier for the specific client device.",
+          "minLength": 8,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderId": {
+          "type": "string",
+          "description": "Unique Cashfree QR order identifier bound to this device.",
+          "minLength": 5,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "amount": {
+          "type": "number",
+          "description": "Order payment amount in INR (199)."
+        },
+        "status": {
+          "type": "string",
+          "description": "Payment verification status for this specific device order.",
+          "enum": ["PENDING", "PAID"]
+        },
+        "unlockKey": {
+          "type": "string",
+          "description": "The unlocked device key, populated only after verified payment.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the device order was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the device order was updated."
+        }
+      },
+      "required": ["ownerId", "deviceId", "orderId", "amount", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/deviceUnlocks/{unlockId}": {
+      "schema": {
+        "$ref": "#/entities/DeviceUnlock"
+      },
+      "description": "Per-device unlock records isolated strictly to the authenticated device owner."
+    }
+  }
+}

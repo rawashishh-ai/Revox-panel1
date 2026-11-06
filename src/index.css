@@ -1,0 +1,107 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-display: 'Archivo Black', 'Orbitron', sans-serif;
+    --font-cyber: 'Orbitron', sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    background-color: #050001;
+    color: #ffffff;
+    font-family: 'Rajdhani', sans-serif;
+    overflow-x: hidden;
+  }
+}
+
+/* Cyber Red Grid Background matching video */
+.revox-grid-bg {
+  background-color: #050001;
+  background-image: 
+    radial-gradient(circle at 50% 42%, rgba(200, 15, 25, 0.16) 0%, rgba(100, 5, 10, 0.06) 45%, transparent 75%),
+    linear-gradient(to right, rgba(220, 20, 30, 0.075) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(220, 20, 30, 0.075) 1px, transparent 1px);
+  background-size: 100% 100%, 38px 38px, 38px 38px;
+  background-position: center center;
+}
+
+/* Heavy 3D Blocky White Hero Title (REVOX) */
+.title-revox-white {
+  font-family: 'Archivo Black', 'Orbitron', sans-serif;
+  color: #f4f4f6;
+  letter-spacing: 0.04em;
+  text-shadow:
+    0 2px 0 #b8b8c0,
+    0 4px 0 #71717a,
+    0 0 22px rgba(255, 255, 255, 0.35),
+    0 10px 30px rgba(0, 0, 0, 0.9);
+}
+
+/* Heavy 3D Blocky Neon Red Hero Title (KEY) */
+.title-revox-red {
+  font-family: 'Archivo Black', 'Orbitron', sans-serif;
+  color: #ff1a24;
+  letter-spacing: 0.05em;
+  text-shadow:
+    0 2px 0 #990a10,
+    0 4px 0 #5c0408,
+    0 0 18px rgba(255, 26, 36, 0.95),
+    0 0 42px rgba(239, 68, 68, 0.65),
+    0 0 75px rgba(220, 38, 38, 0.45);
+}
+
+/* Skewed Red Action Button matching the video's TUTORIAL button geometry */
+.skew-btn-primary {
+  transform: skewX(-11deg);
+  background: linear-gradient(180deg, #ef1e28 0%, #c81018 100%);
+  box-shadow:
+    0 0 25px rgba(239, 30, 40, 0.55),
+    0 0 6px rgba(255, 100, 100, 0.4) inset;
+  border: 1px solid rgba(255, 90, 95, 0.65);
+  transition: transform 150ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 150ms ease, filter 150ms ease;
+}
+
+.skew-btn-primary:hover {
+  transform: skewX(-11deg) scale(1.03);
+  box-shadow:
+    0 0 36px rgba(255, 35, 45, 0.8),
+    0 0 10px rgba(255, 140, 140, 0.55) inset;
+  filter: brightness(1.08);
+}
+
+.skew-btn-primary:active {
+  transform: skewX(-11deg) scale(0.98);
+}
+
+.skew-btn-content {
+  transform: skewX(11deg);
+}
+
+/* Skewed Dark Outlined Box for Key Status */
+.skew-box-dark {
+  transform: skewX(-8deg);
+}
+
+.skew-box-dark-content {
+  transform: skewX(8deg);
+}
+
+@keyframes scanlineMove {
+  0% {
+    transform: translateY(0%);
+    opacity: 0.85;
+  }
+  50% {
+    transform: translateY(220px);
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(0%);
+    opacity: 0.85;
+  }
+}
+
+.qr-scan-line {
+  animation: scanlineMove 2.8s ease-in-out infinite;
+}

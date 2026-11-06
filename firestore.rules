@@ -1,0 +1,83 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net: Default-deny catch-all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Validation Blueprint for DeviceUnlock Entity
+    function isValidDeviceUnlock(data) {
+      return data.keys().hasAll(['ownerId', 'deviceId', 'orderId', 'amount', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['ownerId', 'deviceId', 'orderId', 'amount', 'status', 'unlockKey', 'createdAt', 'updatedAt']) &&
+        data.ownerId is string && data.ownerId.size() >= 1 && data.ownerId.size() <= 128 && data.ownerId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.ownerId == request.auth.uid &&
+        data.deviceId is string && data.deviceId.size() >= 8 && data.deviceId.size() <= 128 && data.deviceId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.orderId is string && data.orderId.size() >= 5 && data.orderId.size() <= 128 && data.orderId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.amount is number && data.amount >= 1 && data.amount <= 1000000 &&
+        data.status is string && (data.status == 'PENDING' || data.status == 'PAID') &&
+        (!('unlockKey' in data) || (data.unlockKey is string && data.unlockKey.size() >= 1 && data.unlockKey.size() <= 64)) &&
+        data.createdAt is timestamp &&
+        (!('updatedAt' in data) || data.updatedAt is timestamp);
+    }
+
+    match /deviceUnlocks/{unlockId} {
+      allow get: if isVerifiedUser() && isValidId(unlockId) && (resource == null || existing().ownerId == request.auth.uid);
+      allow list: if isVerifiedUser() && existing().ownerId == request.auth.uid;
+
+      allow create: if isVerifiedUser() &&
+        isValidId(unlockId) &&
+        isValidDeviceUnlock(incoming()) &&
+        incoming().createdAt == request.time &&
+        (
+          (incoming().status == 'PENDING' && !('unlockKey' in incoming())) ||
+          (incoming().status == 'PAID' && ('unlockKey' in incoming()))
+        );
+
+      allow update: if isVerifiedUser() &&
+        isValidId(unlockId) &&
+        isValidDeviceUnlock(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        existing().status != 'PAID' &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().deviceId == existing().deviceId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action 1: Update dynamic amount / orderId while still PENDING
+          (incoming().status == 'PENDING' &&
+           !('unlockKey' in incoming()) &&
+           incoming().amount >= existing().amount &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['amount', 'orderId', 'updatedAt'])) ||
+          // Action 2: Mark device order as PAID with verified unlockKey
+          (incoming().status == 'PAID' &&
+           ('unlockKey' in incoming()) &&
+           incoming().diff(existing()).affectedKeys().hasOnly(['status', 'unlockKey', 'amount', 'orderId', 'updatedAt']))
+        );
+
+      allow delete: if false;
+    }
+  }
+}

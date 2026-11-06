@@ -1,0 +1,6 @@
+{
+  "name": "REVOX KEY - Device Unlock System",
+  "description": "Next-Gen Monitoring System Device Unlock Key Portal with Cashfree QR Checkout.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

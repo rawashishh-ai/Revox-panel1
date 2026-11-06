@@ -10,6 +10,7 @@ const app = express();
 const PORT = 3000;
 
 const RUPAYEX_API_BASE = 'https://rupayex.net/api';
+const BASE_START_AMOUNT = 100;
 const CONFIG_FILE = path.join(process.cwd(), '.rupayex-config.json');
 
 app.use(express.json());
@@ -30,6 +31,7 @@ function getServerRupayexToken(): string {
   const envToken = (
     process.env.RUPAYEX_API_TOKEN ||
     process.env.RUPAYEX_USER_TOKEN ||
+    process.env.USER_TOKEN ||
     process.env.API_TOKEN ||
     ''
   ).trim();
@@ -50,18 +52,6 @@ function getServerRupayexToken(): string {
   }
 
   return '';
-}
-
-function saveServerRupayexToken(token: string) {
-  try {
-    fs.writeFileSync(
-      CONFIG_FILE,
-      JSON.stringify({ userToken: token.trim() }, null, 2),
-      'utf-8'
-    );
-  } catch (err) {
-    console.error('Failed to write server gateway config:', err);
-  }
 }
 
 interface CustomerDetails {
@@ -98,76 +88,16 @@ const orders = new Map<string, OrderRecord>();
 const paidOrderByDevice = new Map<string, string>();
 const devicePriceByDevice = new Map<string, DevicePriceState>();
 
-// Check if server has RupayEx API Token configured (never exposes token to client)
-app.get('/api/rupayex/status', (_req, res) => {
-  const token = getServerRupayexToken();
-  res.json({
-    configured: Boolean(token),
-  });
-});
-
-// Configure server-side RupayEx user_token (stored strictly on server disk, never sent back to client)
-app.post('/api/rupayex/configure', async (req, res) => {
-  try {
-    const userToken = String(req.body?.userToken || '').trim();
-    if (!userToken || userToken.length < 6) {
-      res.status(400).json({
-        error: 'INVALID_TOKEN',
-        message: 'A valid RupayEx API Token (user_token) is required.',
-      });
-      return;
-    }
-
-    // Validate token with https://rupayex.net/api/order-status
-    const verifyUrl = `${RUPAYEX_API_BASE}/order-status?user_token=${encodeURIComponent(
-      userToken
-    )}&order_id=VERIFY_${Date.now()}`;
-
-    const checkResp = await fetch(verifyUrl, {
-      method: 'GET',
-      headers: { Accept: 'application/json' },
-    });
-
-    const rawText = await checkResp.text();
-    let checkData: { status?: boolean | string; message?: string } = {};
-    try {
-      checkData = JSON.parse(rawText);
-    } catch {
-      // Non-JSON response
-    }
-
-    if (
-      checkData.message &&
-      (checkData.message.toLowerCase().includes('invalid api token') ||
-        checkData.message.toLowerCase().includes('api token required'))
-    ) {
-      res.status(400).json({
-        error: 'AUTH_FAILED',
-        message: `RupayEx Authentication Failed: ${checkData.message}`,
-      });
-      return;
-    }
-
-    saveServerRupayexToken(userToken);
-    res.json({
-      configured: true,
-    });
-  } catch (err) {
-    console.error('Error verifying RupayEx API token:', err);
-    res.status(500).json({
-      error: 'SERVER_ERROR',
-      message: 'Failed to validate token with https://rupayex.net/api.',
-    });
-  }
-});
-
-// Sync per-device dynamic price state
+// Sync per-device dynamic price state (starts at ₹100, +₹20 every 5s until stopped)
 app.post('/api/rupayex/sync-device-price', (req, res) => {
   try {
     const { deviceId, amount, isStopped } = req.body || {};
     if (typeof deviceId === 'string' && deviceId.length >= 8) {
       const prev = devicePriceByDevice.get(deviceId);
-      const validAmount = Math.max(1, Number(amount) || 1);
+      const validAmount = Math.max(
+        BASE_START_AMOUNT,
+        Number(amount) || BASE_START_AMOUNT
+      );
       const nowStopped = Boolean(isStopped);
       devicePriceByDevice.set(deviceId, {
         amount: validAmount,
@@ -232,7 +162,7 @@ app.post('/api/rupayex/device-session', (req, res) => {
 });
 
 // Initiate Payment Request via POST https://rupayex.net/api/create-order
-// Returns paymentUrl for direct redirect to RupayEx Checkout (NO QR code on our website)
+// Redirects directly to RupayEx Checkout URL (NO QR code on our website)
 app.post('/api/rupayex/create-order', async (req, res) => {
   try {
     const {
@@ -287,43 +217,34 @@ app.post('/api/rupayex/create-order', async (req, res) => {
       res.status(400).json({
         error: 'GATEWAY_TOKEN_MISSING',
         message:
-          'RupayEx API Token (user_token) is not configured on the server. Please configure your RupayEx API token.',
+          'RUPAYEX_API_TOKEN is not set in server environment (.env). Please set RUPAYEX_API_TOKEN on the server.',
       });
       return;
     }
 
-    const cleanMobile = String(customerMobile || '9876543210')
-      .replace(/\D/g, '')
-      .slice(-10);
-    if (cleanMobile.length !== 10) {
-      res.status(400).json({
-        error: 'INVALID_MOBILE',
-        message: 'Please enter a valid 10-digit mobile number.',
-      });
-      return;
-    }
+    const cleanMobile =
+      String(customerMobile || '9876543210')
+        .replace(/\D/g, '')
+        .slice(-10) || '9876543210';
 
     const cleanName =
-      String(customerName || 'Revox User')
+      String(customerName || 'Revox Customer')
         .trim()
-        .slice(0, 60) || 'Revox User';
+        .slice(0, 60) || 'Revox Customer';
+
     const cleanEmail =
-      String(customerEmail || 'user@revoxkey.online')
+      String(customerEmail || 'user@revoxpanel.site')
         .trim()
-        .slice(0, 80) || 'user@revoxkey.online';
+        .slice(0, 80) || 'user@revoxpanel.site';
 
-    const amount = Math.max(1, Math.round(Number(requestedAmount) || 1));
-
-    // Lock the device price when payment is initiated
-    devicePriceByDevice.set(deviceId, {
-      amount,
-      isStopped: true,
-      stoppedAt: Date.now(),
-    });
+    const amount = Math.max(
+      BASE_START_AMOUNT,
+      Math.round(Number(requestedAmount) || BASE_START_AMOUNT)
+    );
 
     const baseRedirectUrl = (
       String(originUrl || process.env.APP_URL || '').trim() ||
-      'https://rupayex.net'
+      'https://revoxpanel.site'
     ).replace(/\/$/, '');
 
     const orderId = `RX${Date.now()}${Math.floor(1000 + Math.random() * 9000)}`;
@@ -393,10 +314,7 @@ app.post('/api/rupayex/create-order', async (req, res) => {
       const msg =
         createData.message || 'Failed to initiate payment with RupayEx gateway.';
       res.status(400).json({
-        error:
-          msg.toLowerCase().includes('token')
-            ? 'GATEWAY_TOKEN_MISSING'
-            : 'ORDER_INITIATION_FAILED',
+        error: 'ORDER_INITIATION_FAILED',
         message: msg,
       });
       return;
@@ -420,7 +338,6 @@ app.post('/api/rupayex/create-order', async (req, res) => {
       },
       paymentUrl,
       status: 'PENDING',
-      // Do NOT generate or assign unlock key until payment is confirmed PAID
       unlockKey: null,
       licenseKey: null,
       createdAt: Date.now(),
@@ -573,7 +490,7 @@ async function verifyOrderWithRupayexServer(record: OrderRecord): Promise<{
   }
 }
 
-//RupayEx Webhook / Server Callback Handler
+// RupayEx Webhook / Server Callback Handler
 app.post('/api/rupayex/webhook', async (req, res) => {
   try {
     const orderId = String(
@@ -595,7 +512,6 @@ app.post('/api/rupayex/webhook', async (req, res) => {
       return;
     }
 
-    // Always re-verify directly against RupayEx GET /api/order-status so spoofed webhooks cannot forge unlocks
     await verifyOrderWithRupayexServer(record);
 
     res.json({ status: true });
@@ -604,7 +520,7 @@ app.post('/api/rupayex/webhook', async (req, res) => {
   }
 });
 
-// Verify Order Endpoint called after redirect or on user request
+// Verify Order Endpoint called after redirect
 app.post('/api/rupayex/verify-order', async (req, res) => {
   try {
     const { orderId, deviceId, deviceSecret } = req.body || {};

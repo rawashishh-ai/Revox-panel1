@@ -23,9 +23,8 @@ import {
   Hand,
   Download,
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
-  ShieldCheck,
-  Settings,
   Loader2,
 } from 'lucide-react';
 import { RedParticlesCanvas } from './components/RedParticlesCanvas';
@@ -38,11 +37,13 @@ import {
   OperationType,
 } from './firebase';
 
+const BASE_START_AMOUNT = 100;
+const PRICE_STEP_AMOUNT = 20;
 const LOCKED_BLUR_PLACEHOLDER = 'THEUPCYBER••••••';
-const AMOUNT_STORAGE_KEY = 'revox_rupayex_amount_v3';
-const STOPPED_STORAGE_KEY = 'revox_rupayex_stopped_v3';
-const ACTIVE_ORDER_STORAGE_KEY = 'revox_rupayex_active_order_v3';
-const RECEIPT_STORAGE_KEY = 'revox_rupayex_receipt_v3';
+const AMOUNT_STORAGE_KEY = 'revox_rupayex_amount_v4';
+const STOPPED_STORAGE_KEY = 'revox_rupayex_stopped_v4';
+const ACTIVE_ORDER_STORAGE_KEY = 'revox_rupayex_active_order_v4';
+const RECEIPT_STORAGE_KEY = 'revox_rupayex_receipt_v4';
 
 interface SavedReceipt {
   orderId: string;
@@ -59,7 +60,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [authReady, setAuthReady] = useState<boolean>(false);
 
-  // Clean up legacy localStorage keys on mount
+  // Clean up old localStorage keys so it starts cleanly at ₹100
   useEffect(() => {
     localStorage.removeItem('revox_device_current_amount_v1');
     localStorage.removeItem('revox_device_price_stopped_v1');
@@ -67,23 +68,22 @@ export default function App() {
     localStorage.removeItem('revox_rupayex_amount_v2');
     localStorage.removeItem('revox_rupayex_stopped_v2');
     localStorage.removeItem('revox_rupayex_receipt_v2');
+    localStorage.removeItem('revox_rupayex_amount_v3');
+    localStorage.removeItem('revox_rupayex_stopped_v3');
+    localStorage.removeItem('revox_rupayex_active_order_v3');
+    localStorage.removeItem('revox_rupayex_receipt_v3');
   }, []);
 
-  // Dynamically calculated payment amount: starts at ₹1 (or resumes where it left off)
+  // Dynamically calculated payment amount: starts at ₹100 (or resumes where it stopped/left off)
   const [currentAmount, setCurrentAmount] = useState<number>(() => {
     const saved = Number(localStorage.getItem(AMOUNT_STORAGE_KEY));
-    return saved >= 1 ? saved : 1;
+    return saved >= BASE_START_AMOUNT ? saved : BASE_START_AMOUNT;
   });
 
-  // Whether the user clicked "RUK JAO PAYMENT KARTA HU" or "PAY NOW" to lock the dynamic price
+  // Only becomes true when user clicks "RUK JAO PAYMENT KARTA HU" (or payment is completed)
   const [isPriceStopped, setIsPriceStopped] = useState<boolean>(() => {
     return localStorage.getItem(STOPPED_STORAGE_KEY) === 'true';
   });
-
-  // Customer Details for RupayEx Order Creation
-  const [customerName, setCustomerName] = useState<string>('Revox User');
-  const [customerEmail, setCustomerEmail] = useState<string>('user@revoxkey.online');
-  const [customerMobile, setCustomerMobile] = useState<string>('9876543210');
 
   // Payment & Key Unlock States
   const [showPaymentPage, setShowPaymentPage] = useState<boolean>(false);
@@ -100,20 +100,13 @@ export default function App() {
   const [isVerifyingReturn, setIsVerifyingReturn] = useState<boolean>(false);
   const [paymentError, setPaymentError] = useState<string | null>(null);
 
-  // Server-side gateway token setup modal (write-only to server, never exposed in frontend JS)
-  const [showTokenConfig, setShowTokenConfig] = useState<boolean>(false);
-  const [serverTokenInput, setServerTokenInput] = useState<string>('');
-  const [isSavingToken, setIsSavingToken] = useState<boolean>(false);
-
   const [copied, setCopied] = useState<boolean>(false);
   const paymentLockRef = useRef<boolean>(false);
 
-  // Track Firebase Auth state & prefill customer info if signed in
+  // Track Firebase Auth state
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
-      if (user?.displayName) setCustomerName(user.displayName);
-      if (user?.email) setCustomerEmail(user.email);
       setAuthReady(true);
     });
     return () => unsub();
@@ -135,22 +128,21 @@ export default function App() {
     }).catch(() => {});
   }, [deviceId, currentAmount, isPriceStopped]);
 
-  // Increase amount by +₹15 every 5 seconds while payment page is open until stopped or paid
+  // Every 5 seconds while payment page is open, increase amount by +₹20 UNTIL user clicks "RUK JAO PAYMENT KARTA HU"
   useEffect(() => {
     if (
       !showPaymentPage ||
       isPaid ||
       isPriceStopped ||
       isSubmittingPayment ||
-      isVerifyingReturn ||
-      showTokenConfig
+      isVerifyingReturn
     ) {
       return;
     }
 
     const interval = setInterval(() => {
       setCurrentAmount((prev) => {
-        const next = prev + 15;
+        const next = prev + PRICE_STEP_AMOUNT;
         localStorage.setItem(AMOUNT_STORAGE_KEY, String(next));
         return next;
       });
@@ -163,7 +155,6 @@ export default function App() {
     isPriceStopped,
     isSubmittingPayment,
     isVerifyingReturn,
-    showTokenConfig,
   ]);
 
   // Sync per-device order & unlock state to Firestore when user is signed in
@@ -186,7 +177,7 @@ export default function App() {
             ownerId: currentUser.uid.slice(0, 128),
             deviceId: deviceId.slice(0, 128),
             orderId: orderId.slice(0, 128),
-            amount: Math.max(1, amountToSave),
+            amount: Math.max(BASE_START_AMOUNT, amountToSave),
             status,
             createdAt: serverTimestamp(),
           };
@@ -201,13 +192,19 @@ export default function App() {
               await updateDoc(docRef, {
                 status: 'PAID',
                 unlockKey: keyToSave.slice(0, 64),
-                amount: Math.max(existingData.amount || 1, amountToSave),
+                amount: Math.max(
+                  existingData.amount || BASE_START_AMOUNT,
+                  amountToSave
+                ),
                 orderId: orderId.slice(0, 128),
                 updatedAt: serverTimestamp(),
               });
             } else {
               await updateDoc(docRef, {
-                amount: Math.max(existingData.amount || 1, amountToSave),
+                amount: Math.max(
+                  existingData.amount || BASE_START_AMOUNT,
+                  amountToSave
+                ),
                 orderId: orderId.slice(0, 128),
                 updatedAt: serverTimestamp(),
               });
@@ -301,7 +298,7 @@ export default function App() {
           );
         } else {
           setPaymentError(
-            'Payment is not completed yet on RupayEx. Complete the payment or click PAY NOW to start a new checkout.'
+            'Payment was not completed. Click PAY NOW to complete your payment.'
           );
         }
       } catch {
@@ -329,7 +326,6 @@ export default function App() {
         params.get('order_id') || params.get('orderId') || '';
 
       if (returnedOrderId) {
-        // Clean query param from URL without reloading
         const cleanUrl = window.location.pathname + window.location.hash;
         window.history.replaceState({}, document.title, cleanUrl);
         setShowPaymentPage(true);
@@ -414,11 +410,6 @@ export default function App() {
     setPaymentError(null);
     setCheckoutUrl(null);
 
-    // Lock the dynamic price at the current amount
-    setIsPriceStopped(true);
-    localStorage.setItem(STOPPED_STORAGE_KEY, 'true');
-    localStorage.setItem(AMOUNT_STORAGE_KEY, String(currentAmount));
-
     try {
       const response = await fetch('/api/rupayex/create-order', {
         method: 'POST',
@@ -428,9 +419,9 @@ export default function App() {
           deviceSecret,
           uid: currentUser?.uid,
           amount: currentAmount,
-          customerName,
-          customerEmail,
-          customerMobile,
+          customerName: currentUser?.displayName || 'Revox Customer',
+          customerEmail: currentUser?.email || 'user@revoxpanel.site',
+          customerMobile: '9876543210',
           originUrl: window.location.origin,
         }),
       });
@@ -448,16 +439,17 @@ export default function App() {
       }
 
       if (!response.ok || !data.paymentUrl) {
-        if (data.error === 'GATEWAY_TOKEN_MISSING') {
-          setShowTokenConfig(true);
-        }
         setPaymentError(
           data.message || 'Failed to initiate payment with RupayEx gateway.'
         );
         return;
       }
 
-      // Store orderId for server-side verification upon return
+      // Lock the price now that the gateway order is created
+      setIsPriceStopped(true);
+      localStorage.setItem(STOPPED_STORAGE_KEY, 'true');
+      localStorage.setItem(AMOUNT_STORAGE_KEY, String(currentAmount));
+
       setActiveOrderId(data.orderId);
       setCheckoutUrl(data.paymentUrl);
       localStorage.setItem(ACTIVE_ORDER_STORAGE_KEY, data.orderId);
@@ -481,36 +473,6 @@ export default function App() {
     } finally {
       setIsSubmittingPayment(false);
       paymentLockRef.current = false;
-    }
-  };
-
-  // Configure RupayEx API Token on the backend server
-  const handleSaveServerToken = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSavingToken(true);
-    setPaymentError(null);
-
-    try {
-      const res = await fetch('/api/rupayex/configure', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userToken: serverTokenInput,
-        }),
-      });
-
-      const data = await res.json();
-      if (!res.ok) {
-        setPaymentError(data.message || 'Invalid RupayEx API Token.');
-      } else {
-        setServerTokenInput('');
-        setShowTokenConfig(false);
-        setPaymentError(null);
-      }
-    } catch {
-      setPaymentError('Failed to save token on server.');
-    } finally {
-      setIsSavingToken(false);
     }
   };
 
@@ -617,49 +579,61 @@ export default function App() {
         </div>
       </main>
 
-      {/* REVOX KEY PAYMENT PAGE — DIRECT RUPAYEX GATEWAY CHECKOUT (NO QR CODE) */}
+      {/* CLEAN, SIMPLE & PROFESSIONAL FULL-SCREEN PAYMENT PAGE (NO SETTINGS BUTTON, NO QR) */}
       {showPaymentPage && (
         <div className="fixed inset-0 z-50 w-full h-full min-h-screen bg-[#060102] flex flex-col justify-between px-5 py-6 sm:p-10 text-white overflow-y-auto">
-          {/* Top Bar */}
+          {/* Clean Top Bar — Only Title & Close Button (Settings Deleted) */}
           <div className="w-full max-w-md mx-auto flex items-center justify-between">
             <span className="font-['Orbitron'] text-xs sm:text-sm font-bold tracking-[0.18em] text-[#ff1e27] uppercase">
               REVOX KEY PAYMENT
             </span>
 
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setShowTokenConfig((prev) => !prev)}
-                aria-label="Gateway Configuration"
-                title="Configure RupayEx Server API Token"
-                className="w-8 h-8 bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer rounded-full"
-              >
-                <Settings className="w-4 h-4" />
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setShowPaymentPage(false)}
-                aria-label="Close Payment Page"
-                className="w-8 h-8 bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer rounded-full"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowPaymentPage(false)}
+              aria-label="Close Payment Page"
+              className="w-9 h-9 bg-white/5 hover:bg-white/10 flex items-center justify-center text-zinc-400 hover:text-white transition-colors cursor-pointer rounded-full"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
 
-          {/* Center Checkout Container */}
-          <div className="flex-1 flex flex-col items-center justify-center w-full max-w-md mx-auto my-4">
-            {/* Dynamic Amount Display */}
-            <div className="text-center mb-6">
-              <p className="font-mono text-[10px] tracking-[0.22em] text-zinc-400 uppercase mb-1">
-                {isPaid
-                  ? 'PAYMENT VERIFIED & COMPLETED'
-                  : isPriceStopped
-                  ? 'AMOUNT LOCKED FOR CHECKOUT'
-                  : 'DYNAMIC AMOUNT (+₹15 EVERY 5 SEC)'}
+          {/* Center Clean & Simple Checkout Container */}
+          <div className="flex-1 flex flex-col items-center justify-center w-full max-w-md mx-auto my-4 space-y-5">
+            {/* BIG PROMINENT WARNING BANNER (+₹20 EVERY 5 SECONDS) */}
+            {!isPaid && (
+              <div
+                className={`w-full rounded-2xl px-4 py-3.5 text-center transition-all ${
+                  isPriceStopped
+                    ? 'bg-emerald-950/35 border border-emerald-600/40'
+                    : 'bg-amber-500/15 border-2 border-amber-500/70 shadow-[0_0_25px_rgba(245,158,11,0.25)]'
+                }`}
+              >
+                {!isPriceStopped ? (
+                  <div className="flex flex-col items-center justify-center gap-1">
+                    <div className="flex items-center justify-center gap-2 text-amber-300 font-mono text-sm sm:text-base font-extrabold tracking-wide uppercase">
+                      <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 animate-pulse" />
+                      <span>⚠️ WARNING: +₹20 EVERY 5 SECONDS!</span>
+                    </div>
+                    <p className="font-mono text-xs text-amber-100/90 font-medium">
+                      Har 5 second mein price ₹20 badh raha hai!
+                    </p>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-center gap-2 text-emerald-300 font-mono text-xs sm:text-sm font-bold tracking-wider uppercase">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <span>PRICE STOPPED & LOCKED AT ₹{currentAmount}</span>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Giant Live Amount Display */}
+            <div className="text-center py-1">
+              <p className="font-mono text-[11px] tracking-[0.22em] text-zinc-400 uppercase mb-1">
+                {isPaid ? 'PAYMENT COMPLETED' : 'PAYABLE AMOUNT'}
               </p>
-              <div className="font-['Orbitron'] text-4xl sm:text-5xl font-black tracking-tight text-white tabular-nums">
+              <div className="font-['Orbitron'] text-5xl sm:text-6xl font-black tracking-tight text-white tabular-nums">
                 ₹{currentAmount}
               </div>
               {(verifiedOrderId || activeOrderId) && (
@@ -669,191 +643,90 @@ export default function App() {
               )}
             </div>
 
-            {/* Server API Token Setup Form (only shown if merchant needs to set server token) */}
-            {showTokenConfig ? (
-              <form
-                onSubmit={handleSaveServerToken}
-                className="w-full bg-white/[0.04] rounded-2xl p-5 mb-5 text-left space-y-3.5"
+            {/* PROMINENT "RUK JAO PAYMENT KARTA HU" BUTTON — Clearly visible so users can stop the timer */}
+            {!isPaid && !isPriceStopped && (
+              <button
+                type="button"
+                onClick={handleFreezePriceClick}
+                className="w-full py-4 px-5 bg-amber-500 hover:bg-amber-400 active:scale-[0.99] text-black font-mono text-sm sm:text-base font-extrabold tracking-[0.12em] uppercase rounded-2xl shadow-[0_8px_28px_rgba(245,158,11,0.4)] flex items-center justify-center gap-2.5 cursor-pointer transition-all"
               >
-                <div className="flex items-center justify-between">
-                  <span className="font-mono text-xs font-bold tracking-wider text-white uppercase">
-                    SERVER GATEWAY CONFIGURATION
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setShowTokenConfig(false)}
-                    className="font-mono text-[10px] text-zinc-400 hover:text-white uppercase cursor-pointer"
-                  >
-                    CLOSE
-                  </button>
-                </div>
+                <Hand className="w-5 h-5 stroke-[2.5] shrink-0" />
+                <span>RUK JAO PAYMENT KARTA HU</span>
+              </button>
+            )}
 
-                {paymentError && (
-                  <div className="flex items-start gap-2 text-amber-300 font-mono text-[11px] leading-relaxed">
-                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-400" />
-                    <span>{paymentError}</span>
-                  </div>
-                )}
+            {/* Error / Failure / Cancellation Message Banner */}
+            {paymentError && (
+              <div className="w-full bg-red-950/50 border border-red-700/60 rounded-2xl p-4 text-left flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <p className="font-mono text-xs text-red-200 leading-relaxed">
+                  {paymentError}
+                </p>
+              </div>
+            )}
 
-                <div>
-                  <label className="block font-mono text-[10px] tracking-[0.18em] text-zinc-400 uppercase mb-1">
-                    RUPAYEX API TOKEN (STORED ON SERVER)
-                  </label>
-                  <input
-                    type="password"
-                    required
-                    value={serverTokenInput}
-                    onChange={(e) => setServerTokenInput(e.target.value)}
-                    placeholder="Enter your RupayEx API Token"
-                    className="w-full px-3.5 py-2.5 bg-black/70 rounded-xl text-white font-mono text-xs outline-none focus:ring-1 focus:ring-red-500 placeholder:text-zinc-600"
-                  />
-                </div>
+            {/* Verifying Return Spinner */}
+            {isVerifyingReturn && (
+              <div className="w-full bg-white/[0.04] rounded-2xl p-6 flex flex-col items-center justify-center text-center">
+                <Loader2 className="w-8 h-8 text-[#ff1e27] animate-spin mb-3" />
+                <span className="font-mono text-xs tracking-[0.16em] text-zinc-300 uppercase">
+                  VERIFYING PAYMENT STATUS...
+                </span>
+              </div>
+            )}
 
+            {/* Clean Primary PAY NOW Button */}
+            {!isPaid && !isVerifyingReturn && (
+              <div className="w-full space-y-3">
                 <button
-                  type="submit"
-                  disabled={isSavingToken}
-                  className="w-full py-3 bg-[#e11d24] hover:bg-[#f0222a] disabled:opacity-60 text-white font-mono text-xs font-bold tracking-[0.18em] uppercase rounded-xl cursor-pointer transition-colors"
+                  type="button"
+                  disabled={isSubmittingPayment}
+                  onClick={handlePayNowClick}
+                  className="w-full py-4 px-6 bg-[#e11d24] hover:bg-[#f0222a] disabled:opacity-60 active:scale-[0.99] text-white font-mono text-sm sm:text-base font-bold tracking-[0.18em] uppercase rounded-2xl shadow-[0_10px_32px_rgba(225,29,36,0.5)] flex items-center justify-center gap-3 cursor-pointer transition-all"
                 >
-                  {isSavingToken ? 'VALIDATING WITH RUPAYEX...' : 'SAVE SERVER TOKEN'}
+                  {isSubmittingPayment ? (
+                    <>
+                      <Loader2 className="w-5 h-5 animate-spin shrink-0" />
+                      <span>OPENING PAYMENT GATEWAY...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>PAY NOW · ₹{currentAmount}</span>
+                      <ArrowRight className="w-5 h-5 shrink-0" />
+                    </>
+                  )}
                 </button>
-              </form>
-            ) : (
-              <>
-                {/* Error / Failure / Cancellation Message Banner */}
-                {paymentError && (
-                  <div className="w-full bg-red-950/40 border border-red-800/50 rounded-2xl p-4 mb-5 text-left flex items-start gap-3">
-                    <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                    <div className="flex-1">
-                      <p className="font-mono text-xs text-red-200 leading-relaxed">
-                        {paymentError}
-                      </p>
-                    </div>
-                  </div>
+
+                {checkoutUrl && (
+                  <a
+                    href={checkoutUrl}
+                    target="_top"
+                    rel="noopener noreferrer"
+                    className="w-full py-3 px-4 bg-white/10 hover:bg-white/15 text-center text-white font-mono text-xs font-semibold tracking-wider uppercase rounded-xl block transition-colors"
+                  >
+                    CONTINUE TO PAYMENT CHECKOUT
+                  </a>
                 )}
+              </div>
+            )}
 
-                {/* Verifying Return Spinner */}
-                {isVerifyingReturn && (
-                  <div className="w-full bg-white/[0.04] rounded-2xl p-6 mb-5 flex flex-col items-center justify-center text-center">
-                    <Loader2 className="w-8 h-8 text-[#ff1e27] animate-spin mb-3" />
-                    <span className="font-mono text-xs tracking-[0.16em] text-zinc-300 uppercase">
-                      VERIFYING TRANSACTION WITH RUPAYEX SERVER...
-                    </span>
-                  </div>
-                )}
-
-                {/* Customer Details & Direct Gateway Checkout Form (shown before payment is completed) */}
-                {!isPaid && !isVerifyingReturn && (
-                  <div className="w-full bg-white/[0.04] rounded-2xl p-5 mb-5 space-y-3.5 text-left">
-                    <div className="flex items-center justify-between pb-1">
-                      <span className="font-mono text-[11px] font-bold tracking-[0.16em] text-zinc-300 uppercase flex items-center gap-1.5">
-                        <ShieldCheck className="w-4 h-4 text-[#ff2a34]" />
-                        <span>RUPAYEX GATEWAY CHECKOUT</span>
-                      </span>
-                      <span className="font-mono text-[10px] tracking-wider text-zinc-500 uppercase">
-                        INSTANT REDIRECT
-                      </span>
-                    </div>
-
-                    <div>
-                      <label className="block font-mono text-[10px] tracking-[0.16em] text-zinc-400 uppercase mb-1">
-                        CUSTOMER NAME
-                      </label>
-                      <input
-                        type="text"
-                        required
-                        value={customerName}
-                        onChange={(e) => setCustomerName(e.target.value)}
-                        placeholder="Enter Your Name"
-                        className="w-full px-3.5 py-2.5 bg-black/70 rounded-xl text-white font-mono text-xs outline-none focus:ring-1 focus:ring-red-500 placeholder:text-zinc-600"
-                      />
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <div>
-                        <label className="block font-mono text-[10px] tracking-[0.16em] text-zinc-400 uppercase mb-1">
-                          MOBILE NUMBER
-                        </label>
-                        <input
-                          type="tel"
-                          required
-                          maxLength={10}
-                          value={customerMobile}
-                          onChange={(e) =>
-                            setCustomerMobile(e.target.value.replace(/\D/g, '').slice(0, 10))
-                          }
-                          placeholder="10-Digit Mobile"
-                          className="w-full px-3.5 py-2.5 bg-black/70 rounded-xl text-white font-mono text-xs outline-none focus:ring-1 focus:ring-red-500 placeholder:text-zinc-600"
-                        />
-                      </div>
-
-                      <div>
-                        <label className="block font-mono text-[10px] tracking-[0.16em] text-zinc-400 uppercase mb-1">
-                          EMAIL ADDRESS
-                        </label>
-                        <input
-                          type="email"
-                          required
-                          value={customerEmail}
-                          onChange={(e) => setCustomerEmail(e.target.value)}
-                          placeholder="you@example.com"
-                          className="w-full px-3.5 py-2.5 bg-black/70 rounded-xl text-white font-mono text-xs outline-none focus:ring-1 focus:ring-red-500 placeholder:text-zinc-600"
-                        />
-                      </div>
-                    </div>
-
-                    {/* Primary PAY NOW Action — initiates RupayEx order and redirects to payment_url */}
-                    <button
-                      type="button"
-                      disabled={isSubmittingPayment}
-                      onClick={handlePayNowClick}
-                      className="w-full py-3.5 px-5 mt-2 bg-[#e11d24] hover:bg-[#f0222a] disabled:opacity-60 active:scale-[0.99] text-white font-mono text-xs sm:text-sm font-bold tracking-[0.18em] uppercase rounded-xl shadow-[0_8px_28px_rgba(225,29,36,0.45)] flex items-center justify-center gap-2.5 cursor-pointer transition-all"
-                    >
-                      {isSubmittingPayment ? (
-                        <>
-                          <Loader2 className="w-4 h-4 animate-spin shrink-0" />
-                          <span>REDIRECTING TO RUPAYEX...</span>
-                        </>
-                      ) : (
-                        <>
-                          <span>PAY NOW · ₹{currentAmount}</span>
-                          <ArrowRight className="w-4 h-4 shrink-0" />
-                        </>
-                      )}
-                    </button>
-
-                    {/* Direct link fallback if iframe blocks top-window navigation */}
-                    {checkoutUrl && (
-                      <a
-                        href={checkoutUrl}
-                        target="_top"
-                        rel="noopener noreferrer"
-                        className="w-full py-2.5 px-4 bg-white/10 hover:bg-white/15 text-center text-white font-mono text-[11px] font-semibold tracking-wider uppercase rounded-xl block transition-colors"
-                      >
-                        CLICK HERE IF NOT REDIRECTED AUTOMATICALLY
-                      </a>
-                    )}
-                  </div>
-                )}
-
-                {/* Confirmed Payment Success Banner */}
-                {isPaid && (
-                  <div className="w-full bg-emerald-950/35 border border-emerald-700/50 rounded-2xl p-5 mb-5 flex items-center gap-3.5 text-left">
-                    <CheckCircle2 className="w-8 h-8 text-emerald-400 shrink-0" />
-                    <div>
-                      <p className="font-['Orbitron'] text-xs sm:text-sm font-bold tracking-wider text-white uppercase">
-                        PAYMENT CONFIRMED
-                      </p>
-                      <p className="font-mono text-[11px] text-emerald-300 mt-0.5">
-                        Verified by RupayEx Server · Device Key Unlocked
-                      </p>
-                    </div>
-                  </div>
-                )}
-              </>
+            {/* Confirmed Payment Success Banner */}
+            {isPaid && (
+              <div className="w-full bg-emerald-950/35 border border-emerald-700/50 rounded-2xl p-5 flex items-center gap-3.5 text-left">
+                <CheckCircle2 className="w-8 h-8 text-emerald-400 shrink-0" />
+                <div>
+                  <p className="font-['Orbitron'] text-xs sm:text-sm font-bold tracking-wider text-white uppercase">
+                    PAYMENT CONFIRMED
+                  </p>
+                  <p className="font-mono text-[11px] text-emerald-300 mt-0.5">
+                    Device Unlock Key Activated Below
+                  </p>
+                </div>
+              </div>
             )}
 
             {/* Device Unlock Key Box — Blurred until server confirms payment */}
-            <div className="w-full bg-white/[0.04] rounded-2xl p-4 mb-4">
+            <div className="w-full bg-white/[0.04] rounded-2xl p-4">
               <div className="flex items-center justify-between text-[10px] font-mono tracking-wider uppercase mb-1.5">
                 <span className="text-zinc-400 flex items-center gap-1.5">
                   {isPaid ? (
@@ -920,20 +793,6 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* Bottom Button to Freeze Dynamic Price (+₹15/5s) before clicking PAY NOW */}
-            {!isPaid && !isPriceStopped && !showTokenConfig && (
-              <div className="w-full">
-                <button
-                  type="button"
-                  onClick={handleFreezePriceClick}
-                  className="w-full py-3 px-5 bg-white/[0.06] hover:bg-white/[0.1] text-zinc-200 font-mono text-xs font-bold tracking-[0.15em] uppercase rounded-2xl flex items-center justify-center gap-2 cursor-pointer transition-all"
-                >
-                  <Hand className="w-4 h-4 text-[#ff2a34] shrink-0" />
-                  <span>RUK JAO PAYMENT KARTA HU</span>
-                </button>
-              </div>
-            )}
           </div>
 
           <div className="h-1" />
